@@ -1,0 +1,14 @@
+# VoxLumina — Dependências
+# Instale com: pip install -r requirements.txt
+
+# ── Core HTTP / API ───────────────────────────────────────────────────────────
+requests>=2.31.0          # HTTP para Kokoro TTS e Ollama (sem SDKs proprietários)
+flask>=3.0.0              # Servidor web de monitoramento
+
+# ── Ingestão de PDF ───────────────────────────────────────────────────────────
+docling>=2.0.0            # Conversão PDF → Markdown + detecção de layout
+Pillow>=10.0.0            # Recorte e manipulação de imagens extraídas
+
+# ── Opcional: aceleração Docling em CPU/GPU ───────────────────────────────────
+# torch>=2.0.0            # Descomente para usar modelos ML do Docling no GPU
+# torchvision>=0.15.0

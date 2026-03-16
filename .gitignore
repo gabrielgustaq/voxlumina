@@ -1,0 +1,20 @@
+# --- VoxLumina Data ---
+# Ignora tudo dentro das pastas de dados
+input/*
+output/*
+audio/*
+text/*
+temp_segments/*
+temp_vision/
+
+# --- Exceções: Não ignore os arquivos .gitkeep ---
+# Isso garante que a pasta suba para o GitHub mesmo vazia
+!.gitkeep
+
+# --- Python & Sistema ---
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+.env
+.DS_Store
