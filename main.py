@@ -35,10 +35,11 @@ logging.basicConfig(
 log = logging.getLogger("VoxLumina")
 
 # ─── Configurações (sobrepõe com variáveis de ambiente) ───────────────────────
-KOKORO_URL   = os.getenv("KOKORO_URL",   "http://127.0.0.1:8880")
-OLLAMA_URL   = os.getenv("OLLAMA_URL",   "http://127.0.0.1:11434")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2-vision")
-FLASK_PORT   = int(os.getenv("FLASK_PORT", 8080))
+KOKORO_URL     = os.getenv("KOKORO_URL",     "http://127.0.0.1:8880")
+OLLAMA_URL     = os.getenv("OLLAMA_URL",     "http://127.0.0.1:11434")
+OLLAMA_MODEL   = os.getenv("OLLAMA_MODEL",   "llama3.2-vision")
+OLLAMA_TIMEOUT = int(os.getenv("OLLAMA_TIMEOUT", 900))  # 15 min padrão para uso local
+FLASK_PORT     = int(os.getenv("FLASK_PORT", 8080))
 
 # Diretórios do projeto
 DIR_INPUT  = Path("input")    # PDFs de entrada
@@ -60,7 +61,7 @@ _estado = {
 }
 
 # ─── Instâncias dos módulos ────────────────────────────────────────────────────
-_ia       = InteligenciaOllama(OLLAMA_URL, OLLAMA_MODEL)
+_ia       = InteligenciaOllama(OLLAMA_URL, OLLAMA_MODEL, timeout_geracao=OLLAMA_TIMEOUT)
 _narrador = NarradorKokoro(KOKORO_URL)
 _ingestor = Ingestor(imagens_dir=Path("temp_imagens"))
 

@@ -80,7 +80,7 @@ class InteligenciaOllama:
         self,
         base_url: str = "http://localhost:11434",
         modelo: str = "llama3.2-vision",
-        timeout_geracao: int = 300,   # 5 min — modelos vision são lentos
+        timeout_geracao: int = 900,   # padrão 15 min; sobreposto por OLLAMA_TIMEOUT no main.py
         timeout_health: int = 5,
     ):
         self.base_url = base_url.rstrip("/")
