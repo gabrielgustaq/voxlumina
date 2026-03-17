@@ -48,6 +48,10 @@ Sua tarefa é converter TUDO em um array JSON com blocos de narração.
 
 REGRAS OBRIGATÓRIAS:
 - Retorne SOMENTE o array JSON válido, sem markdown (sem ```json), sem explicações
+- CORRIJA acentos em notação LaTeX/PDF para UTF-8 real do Português:
+    ´a→á  ´e→é  ´i→í  ´o→ó  ´u→ú  ´A→Á  ´E→É  ´I→Í  ´O→Ó  ´U→Ú
+    ~a→ã  ~o→õ  ~A→Ã  ~O→Õ  ˆe→ê  ˆo→ô  ˆE→Ê  ˆO→Ô  ¸c→ç  ¸C→Ç  `a→à  ı→i
+- Se encontrar palavras quebradas por hífen de fim de linha (ex: "descri-\nção"), junte-as
 - Cada bloco tem exatamente dois campos: "voice" e "text"
 - Valores de "voice" permitidos: "narrator", "female", "male"
 - Use "narrator" para: títulos, subtítulos, transições, audiodescrições de imagens
@@ -297,6 +301,8 @@ class InteligenciaOllama:
         try:
             dados = json.loads(texto_limpo.strip())
             if isinstance(dados, list) and self._validar_blocos(dados):
+                for bloco in dados:
+                    bloco["text"] = self._sanitizar_texto_brasil(bloco["text"])
                 return dados
         except (json.JSONDecodeError, ValueError):
             pass
@@ -307,6 +313,8 @@ class InteligenciaOllama:
             try:
                 dados = json.loads(match.group(0))
                 if isinstance(dados, list) and self._validar_blocos(dados):
+                    for bloco in dados:
+                        bloco["text"] = self._sanitizar_texto_brasil(bloco["text"])
                     return dados
             except (json.JSONDecodeError, ValueError):
                 pass
@@ -318,11 +326,39 @@ class InteligenciaOllama:
                 dados = json.loads(candidato + "]")
                 if isinstance(dados, list) and self._validar_blocos(dados):
                     log.warning("  JSON estava truncado, foi reparado automaticamente.")
+                    for bloco in dados:
+                        bloco["text"] = self._sanitizar_texto_brasil(bloco["text"])
                     return dados
         except (json.JSONDecodeError, ValueError):
             pass
 
         return None
+
+    def _sanitizar_texto_brasil(self, texto: str) -> str:
+        """
+        Converte escapes de acento comuns em PDFs/LaTeX para UTF-8 brasileiro.
+        Aplicado em cada bloco de texto antes de retornar o JSON final,
+        como camada de segurança caso a LLM não corrija sozinha.
+        """
+        substituicoes = {
+            "´a": "á", "´e": "é", "´i": "í", "´o": "ó", "´u": "ú",
+            "´A": "Á", "´E": "É", "´I": "Í", "´O": "Ó", "´U": "Ú",
+            "~a": "ã",  "~o": "õ",  "~A": "Ã",  "~O": "Õ",
+            "ˆe": "ê",  "ˆo": "ô",  "ˆa": "â",  "ˆE": "Ê",  "ˆO": "Ô",  "ˆA": "Â",
+            "¸c": "ç",  "¸C": "Ç",
+            "`a": "à",  "`A": "À",
+            "ı": "i",
+        }
+        for erro, correto in substituicoes.items():
+            texto = texto.replace(erro, correto)
+
+        # Junta palavras hifenizadas no fim de linha: "descri-\nção" → "descrição"
+        texto = re.sub(r"-\n\s*", "", texto)
+
+        # Remove espaços espúrios antes de caracteres acentuados (artefato de OCR)
+        texto = re.sub(r" ([áéíóúâêôãõçàÁÉÍÓÚÂÊÔÃÕÇÀ])", r"\1", texto)
+
+        return texto
 
     def _validar_blocos(self, blocos: list) -> bool:
         """Valida que cada bloco tem 'voice' e 'text' não-vazios."""
