@@ -22,6 +22,17 @@ from pathlib import Path
 import requests
 from flask import Flask, jsonify, render_template_string, send_from_directory
 
+# ─── Carrega .env ANTES de qualquer os.getenv() ───────────────────────────────
+# python-dotenv lê o arquivo .env e injeta no os.environ.
+# Se não estiver instalado, cai silenciosamente para variáveis de shell.
+try:
+    from dotenv import load_dotenv
+    _env_path = Path(__file__).parent / ".env"
+    load_dotenv(dotenv_path=_env_path, override=False)
+    # override=False: variáveis já exportadas no shell têm precedência sobre o .env
+except ImportError:
+    pass  # sem python-dotenv: use "export VAR=valor" no shell ou o run.sh
+
 from modules.ingestor import Ingestor
 from modules.inteligencia import InteligenciaOllama
 from modules.narrador import NarradorKokoro, VOZES_PADRAO
@@ -34,12 +45,16 @@ logging.basicConfig(
 )
 log = logging.getLogger("VoxLumina")
 
-# ─── Configurações (sobrepõe com variáveis de ambiente) ───────────────────────
+# ─── Configurações lidas do .env / ambiente ───────────────────────────────────
 KOKORO_URL     = os.getenv("KOKORO_URL",     "http://127.0.0.1:8880")
 OLLAMA_URL     = os.getenv("OLLAMA_URL",     "http://127.0.0.1:11434")
 OLLAMA_MODEL   = os.getenv("OLLAMA_MODEL",   "llama3.2-vision")
-OLLAMA_TIMEOUT = int(os.getenv("OLLAMA_TIMEOUT", 900))  # 15 min padrão para uso local
-FLASK_PORT     = int(os.getenv("FLASK_PORT", 8080))
+OLLAMA_TIMEOUT = int(os.getenv("OLLAMA_TIMEOUT", "900"))   # segundos; padrão 15 min
+FLASK_PORT     = int(os.getenv("FLASK_PORT",     "8080"))
+
+# Processamento sequencial: controla tamanho dos lotes enviados ao Ollama.
+PAGINAS_POR_PARTE       = int(os.getenv("PAGINAS_POR_PARTE", "2"))
+MAX_CHARS_MARKDOWN_LOTE = int(os.getenv("MAX_CHARS_MARKDOWN_LOTE", "10000"))
 
 # Diretórios do projeto
 DIR_INPUT  = Path("input")    # PDFs de entrada
@@ -240,8 +255,11 @@ def _verificar_ffmpeg() -> bool:
 
 def pipeline_pdf_para_json() -> Path | None:
     """
-    Orquestra: Seleção de PDF → Docling → Ollama Vision → JSON em text/
-    Retorna o Path do JSON gerado (para encadear com áudio), ou None.
+    Orquestra: Seleção de PDF → Docling em partes → Ollama por lote → JSON em text/.
+
+    O ponto importante é não recombinar o Markdown antes do Ollama. Cada parte
+    do PDF é convertida em blocos JSON separadamente; no final, os arrays são
+    concatenados e salvos em um único arquivo.
     """
     mostrar_cabecalho()
     print("\n  ══ FLUXO 1: Processar Novo PDF ══\n")
@@ -263,12 +281,15 @@ def pipeline_pdf_para_json() -> Path | None:
     _estado["ultimo_pdf"] = pdf_path.name
     print(f"\n  Arquivo selecionado: {pdf_path.name}")
 
-    # ── Etapa 1: Docling ─────────────────────────────────────────────────────
-    print("\n  [1/3] Convertendo PDF com Docling...")
-    print("        (OCR + detecção de layout — pode levar alguns minutos)")
-    _estado["progresso"] = "1/3 Docling"
+    # ── Etapa 1: Docling em partes ───────────────────────────────────────────
+    print("\n  [1/3] Convertendo PDF com Docling em partes...")
+    print(f"        ({PAGINAS_POR_PARTE} página(s) por parte; OCR + layout)")
+    _estado["progresso"] = "1/3 Docling em partes"
 
-    resultado_docling = _ingestor.processar(pdf_path)
+    resultado_docling = _ingestor.processar_em_partes(
+        pdf_path,
+        paginas_por_parte=PAGINAS_POR_PARTE,
+    )
     if resultado_docling is None:
         msg = f"Falha na ingestão Docling: {pdf_path.name}"
         _estado["erros"].append(msg)
@@ -277,11 +298,17 @@ def pipeline_pdf_para_json() -> Path | None:
         input("  Enter para voltar...")
         return None
 
-    markdown = resultado_docling["markdown"]
-    imagens  = resultado_docling["imagens"]
-    print(f"     ✓ Markdown: {len(markdown):,} chars  |  Imagens encontradas: {len(imagens)}")
+    partes = resultado_docling.get("partes", [])
+    imagens = resultado_docling.get("imagens", [])
+    total_chars = sum(len(p.get("markdown", "")) for p in partes)
 
-    # ── Etapa 2: Audiodescrições via Ollama Vision ────────────────────────────
+    print(
+        f"     ✓ Partes: {len(partes)}  |  "
+        f"Markdown total: {total_chars:,} chars  |  "
+        f"Imagens encontradas: {len(imagens)}"
+    )
+
+    # ── Etapa 2: Audiodescrições via Ollama Vision ───────────────────────────
     print(f"\n  [2/3] Gerando audiodescrições ({len(imagens)} imagem(ns) via Ollama Vision)...")
     _estado["progresso"] = "2/3 Audiodescrições"
 
@@ -298,21 +325,61 @@ def pipeline_pdf_para_json() -> Path | None:
     if not imagens:
         print("     (nenhuma imagem identificada no documento)")
 
-    # ── Etapa 3: Markdown + descrições → Blocos JSON ──────────────────────────
-    print("\n  [3/3] Convertendo conteúdo em blocos JSON via Ollama...")
-    print("        (geração de roteiro — pode demorar conforme tamanho do doc)")
-    _estado["progresso"] = "3/3 Gerando JSON"
+    # ── Etapa 3: cada parte → JSON; concatena no final ───────────────────────
+    print("\n  [3/3] Convertendo partes em blocos JSON via Ollama...")
+    print(
+        f"        (sem prompt único gigante; limite por lote: "
+        f"{MAX_CHARS_MARKDOWN_LOTE:,} chars)"
+    )
 
-    blocos = _ia.markdown_para_blocos(markdown, descricoes)
+    blocos = []
+    total_partes = len(partes)
+
+    for parte in partes:
+        indice = parte["indice"]
+        pagina_inicio = parte["pagina_inicio"]
+        pagina_fim = parte["pagina_fim"]
+        markdown_parte = parte.get("markdown", "")
+
+        _estado["progresso"] = f"3/3 JSON parte {indice}/{total_partes}"
+        print(
+            f"     Parte {indice}/{total_partes} "
+            f"(págs. {pagina_inicio}-{pagina_fim}, "
+            f"{len(markdown_parte):,} chars)..."
+        )
+
+        descricoes_parte = [
+            d for d in descricoes
+            if pagina_inicio <= int(d.get("pagina", 0)) <= pagina_fim
+        ]
+
+        blocos_parte = _ia.markdown_para_blocos_em_lotes(
+            markdown_parte,
+            descricoes_parte,
+            max_chars_lote=MAX_CHARS_MARKDOWN_LOTE,
+            contexto=f"Parte {indice}/{total_partes}; páginas {pagina_inicio}-{pagina_fim}",
+        )
+
+        if blocos_parte is None:
+            msg = f"Ollama não retornou JSON válido na parte {indice}/{total_partes}"
+            _estado["erros"].append(msg)
+            _estado["pipeline"] = "idle"
+            print(f"\n  ✗ {msg}")
+            input("  Enter para voltar...")
+            return None
+
+        blocos.extend(blocos_parte)
+        print(f"       ✓ {len(blocos_parte)} blocos acumulados")
+
     if not blocos:
-        msg = "Ollama não retornou blocos JSON válidos"
+        msg = "Nenhum bloco JSON foi gerado"
         _estado["erros"].append(msg)
         _estado["pipeline"] = "idle"
         print(f"\n  ✗ {msg}")
         input("  Enter para voltar...")
         return None
 
-    # ── Salva JSON em text/ ───────────────────────────────────────────────────
+    # ── Salva JSON em text/ ──────────────────────────────────────────────────
     nome_json    = pdf_path.stem + ".json"
     caminho_json = DIR_TEXT / nome_json
 

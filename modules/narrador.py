@@ -45,7 +45,7 @@ class NarradorKokoro:
 
     def __init__(
         self,
-        kokoro_url: str = "http://127.0.0.1:8880",
+        kokoro_url: str = os.getenv("KOKORO_URL"),
         timeout_tts: int = 120,
         timeout_health: int = 3,
     ):

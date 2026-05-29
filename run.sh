@@ -29,16 +29,19 @@ source venv/bin/activate
 echo "  ✓  Ambiente virtual ativado."
 
 # ── Carrega variáveis do .env ─────────────────────────────────────────────────
+# O main.py usa python-dotenv para carregar o .env automaticamente.
+# O bloco abaixo exporta as variáveis também para o shell (útil para scripts
+# auxiliares ou se python-dotenv não estiver instalado).
 if [ -f ".env" ]; then
-    # Ignora linhas em branco e comentários; exporta o restante
     set -a
     # shellcheck disable=SC1091
     source <(grep -v '^\s*#' .env | grep -v '^\s*$')
     set +a
-    echo "  ✓  Configurações carregadas do .env"
+    echo "  ✓  .env carregado (shell + python-dotenv)"
 else
-    echo "  ⚠  Arquivo .env não encontrado. Usando padrões do sistema."
-    echo "     Crie um .env com OLLAMA_URL, KOKORO_URL e OLLAMA_MODEL."
+    echo "  ⚠  Arquivo .env não encontrado."
+    echo "     Crie o arquivo ou exporte as variáveis manualmente:"
+    echo "     OLLAMA_URL, OLLAMA_MODEL, OLLAMA_TIMEOUT, KOKORO_URL, FLASK_PORT"
 fi
 
 # ── Verifica dependências externas ────────────────────────────────────────────

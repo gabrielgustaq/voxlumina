@@ -4,10 +4,12 @@
 # ── Core HTTP / API ───────────────────────────────────────────────────────────
 requests>=2.31.0          # HTTP para Kokoro TTS e Ollama (sem SDKs proprietários)
 flask>=3.0.0              # Servidor web de monitoramento
+python-dotenv>=1.0.0      # Carrega variáveis do arquivo .env automaticamente
 
 # ── Ingestão de PDF ───────────────────────────────────────────────────────────
 docling>=2.0.0            # Conversão PDF → Markdown + detecção de layout
 Pillow>=10.0.0            # Recorte e manipulação de imagens extraídas
+pypdf>=4.0.0               # Divide PDFs em partes antes do Docling
 
 # ── Opcional: aceleração Docling em CPU/GPU ───────────────────────────────────
 # torch>=2.0.0            # Descomente para usar modelos ML do Docling no GPU

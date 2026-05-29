@@ -6,6 +6,7 @@ audio/*
 text/*
 temp_segments/*
 temp_vision/
+temp_imagens/*
 
 # --- Exceções: Não ignore os arquivos .gitkeep ---
 # Isso garante que a pasta suba para o GitHub mesmo vazia
@@ -18,3 +19,5 @@ __pycache__/
 *.py[cod]
 .env
 .DS_Store
+.aider*
+agent.md

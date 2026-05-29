@@ -14,6 +14,7 @@ import base64
 import json
 import logging
 import re
+import os
 import time
 from pathlib import Path
 
@@ -83,7 +84,7 @@ class InteligenciaOllama:
     def __init__(
         self,
         base_url: str = "http://localhost:11434",
-        modelo: str = "llama3.2-vision",
+        modelo: str = os.getenv("OLLAMA_MODEL"),
         timeout_geracao: int = 900,   # padrão 15 min; sobreposto por OLLAMA_TIMEOUT no main.py
         timeout_health: int = 5,
     ):
@@ -164,11 +165,70 @@ class InteligenciaOllama:
 
     # ─── Tarefa B: Markdown → Blocos JSON ────────────────────────────────────
 
+    def markdown_para_blocos_em_lotes(
+        self,
+        markdown: str,
+        descricoes_imagens: list[dict],
+        max_tentativas: int = 3,
+        max_chars_lote: int = 10000,
+        contexto: str | None = None,
+    ) -> list[dict] | None:
+        """
+        Converte um Markdown grande em JSON por lotes sequenciais.
+
+        Cada lote é enviado ao Ollama isoladamente; os arrays JSON válidos são
+        concatenados no final. Isso evita prompts gigantes e reduz o risco de
+        truncamento ou timeout.
+        """
+        fragmentos = self._dividir_markdown(markdown, max_chars=max_chars_lote)
+        if not fragmentos:
+            return []
+
+        todos_blocos: list[dict] = []
+        total = len(fragmentos)
+
+        log.info(
+            f"  Markdown dividido em {total} lote(s) "
+            f"(limite {max_chars_lote} chars/lote)"
+        )
+
+        for idx, fragmento in enumerate(fragmentos, 1):
+            contexto_lote = contexto or "Documento"
+            contexto_lote = f"{contexto_lote}; lote {idx}/{total}"
+
+            # Evita repetir audiodescrições quando uma mesma parte precisa ser
+            # quebrada em vários lotes por tamanho.
+            descricoes_lote = descricoes_imagens if idx == 1 else []
+
+            log.info(
+                f"  Convertendo lote {idx}/{total}: "
+                f"{len(fragmento)} chars"
+            )
+
+            blocos = self.markdown_para_blocos(
+                fragmento,
+                descricoes_lote,
+                max_tentativas=max_tentativas,
+                max_chars_markdown=max_chars_lote + 1000,
+                contexto=contexto_lote,
+            )
+
+            if blocos is None:
+                log.error(f"  Falha ao converter lote {idx}/{total} em JSON.")
+                return None
+
+            todos_blocos.extend(blocos)
+
+        log.info(f"  Conversão em lotes concluída: {len(todos_blocos)} blocos")
+        return todos_blocos
+
     def markdown_para_blocos(
         self,
         markdown: str,
         descricoes_imagens: list[dict],
         max_tentativas: int = 3,
+        max_chars_markdown: int = 12000,
+        contexto: str | None = None,
     ) -> list[dict] | None:
         """
         Converte Markdown + audiodescrições em blocos JSON {voice, text}.
@@ -189,11 +249,17 @@ class InteligenciaOllama:
                 linhas.append(f"[Página {d['pagina']}] {d['descricao']}")
             secao_descricoes = "\n".join(linhas)
 
-        # Limita tamanho para não estourar contexto (llama3.2-vision: ~8k tokens)
-        markdown_truncado = self._truncar_markdown(markdown, max_chars=12000)
+        # Limite de segurança. O fluxo principal deve chamar markdown_para_blocos_em_lotes()
+        # para evitar truncamento; aqui o corte fica apenas como fallback.
+        markdown_truncado = self._truncar_markdown(markdown, max_chars=max_chars_markdown)
+
+        cabecalho_contexto = ""
+        if contexto:
+            cabecalho_contexto = f"\n\n--- CONTEXTO DESTE TRECHO ---\n{contexto}\n"
 
         prompt_completo = (
             PROMPT_MARKDOWN_PARA_JSON
+            + cabecalho_contexto
             + markdown_truncado
             + secao_descricoes
         )
@@ -301,9 +367,7 @@ class InteligenciaOllama:
         try:
             dados = json.loads(texto_limpo.strip())
             if isinstance(dados, list) and self._validar_blocos(dados):
-                for bloco in dados:
-                    bloco["text"] = self._sanitizar_texto_brasil(bloco["text"])
-                return dados
+                return self._normalizar_blocos(dados)
         except (json.JSONDecodeError, ValueError):
             pass
 
@@ -313,9 +377,7 @@ class InteligenciaOllama:
             try:
                 dados = json.loads(match.group(0))
                 if isinstance(dados, list) and self._validar_blocos(dados):
-                    for bloco in dados:
-                        bloco["text"] = self._sanitizar_texto_brasil(bloco["text"])
-                    return dados
+                    return self._normalizar_blocos(dados)
             except (json.JSONDecodeError, ValueError):
                 pass
 
@@ -326,13 +388,120 @@ class InteligenciaOllama:
                 dados = json.loads(candidato + "]")
                 if isinstance(dados, list) and self._validar_blocos(dados):
                     log.warning("  JSON estava truncado, foi reparado automaticamente.")
-                    for bloco in dados:
-                        bloco["text"] = self._sanitizar_texto_brasil(bloco["text"])
-                    return dados
+                    return self._normalizar_blocos(dados)
         except (json.JSONDecodeError, ValueError):
             pass
 
         return None
+
+    def _normalizar_blocos(self, blocos: list, max_chars_texto: int = 450) -> list[dict]:
+        """Sanitiza vozes/textos e quebra blocos longos antes do TTS."""
+        normalizados: list[dict] = []
+        vozes_validas = {"narrator", "female", "male"}
+
+        for bloco in blocos:
+            voice = str(bloco.get("voice", "narrator")).lower().strip()
+            if voice not in vozes_validas:
+                voice = "narrator"
+
+            texto = self._sanitizar_texto_brasil(str(bloco.get("text", "")).strip())
+            if not texto:
+                continue
+
+            for trecho in self._quebrar_texto_longo(texto, max_chars=max_chars_texto):
+                normalizados.append({"voice": voice, "text": trecho})
+
+        return normalizados
+
+    def _quebrar_texto_longo(self, texto: str, max_chars: int = 450) -> list[str]:
+        """Quebra texto por frases e, se necessário, por palavras."""
+        texto = re.sub(r"\s+", " ", texto).strip()
+        if len(texto) <= max_chars:
+            return [texto]
+
+        frases = re.split(r"(?<=[.!?;:])\s+", texto)
+        partes: list[str] = []
+        atual = ""
+
+        def quebrar_por_palavras(trecho: str) -> list[str]:
+            saida: list[str] = []
+            buf = ""
+            for palavra in trecho.split():
+                candidato = f"{buf} {palavra}".strip()
+                if len(candidato) <= max_chars:
+                    buf = candidato
+                else:
+                    if buf:
+                        saida.append(buf)
+                    buf = palavra
+            if buf:
+                saida.append(buf)
+            return saida
+
+        for frase in frases:
+            if not frase:
+                continue
+
+            if len(frase) > max_chars:
+                if atual:
+                    partes.append(atual)
+                    atual = ""
+                partes.extend(quebrar_por_palavras(frase))
+                continue
+
+            candidato = f"{atual} {frase}".strip()
+            if len(candidato) <= max_chars:
+                atual = candidato
+            else:
+                if atual:
+                    partes.append(atual)
+                atual = frase
+
+        if atual:
+            partes.append(atual)
+
+        return [p.strip() for p in partes if p.strip()]
+
+    def _dividir_markdown(self, texto: str, max_chars: int = 10000) -> list[str]:
+        """Divide Markdown em lotes preservando parágrafos quando possível."""
+        texto = (texto or "").strip()
+        if not texto:
+            return []
+        if len(texto) <= max_chars:
+            return [texto]
+
+        paragrafos = re.split(r"\n\s*\n", texto)
+        lotes: list[str] = []
+        atual: list[str] = []
+        tamanho_atual = 0
+
+        def flush():
+            nonlocal atual, tamanho_atual
+            if atual:
+                lotes.append("\n\n".join(atual).strip())
+                atual = []
+                tamanho_atual = 0
+
+        for paragrafo in paragrafos:
+            paragrafo = paragrafo.strip()
+            if not paragrafo:
+                continue
+
+            if len(paragrafo) > max_chars:
+                flush()
+                for inicio in range(0, len(paragrafo), max_chars):
+                    lotes.append(paragrafo[inicio:inicio + max_chars].strip())
+                continue
+
+            acrescimo = len(paragrafo) + (2 if atual else 0)
+            if atual and tamanho_atual + acrescimo > max_chars:
+                flush()
+
+            atual.append(paragrafo)
+            tamanho_atual += acrescimo
+
+        flush()
+        return lotes
 
     def _sanitizar_texto_brasil(self, texto: str) -> str:
         """
@@ -373,9 +542,8 @@ class InteligenciaOllama:
                 log.debug(f"  Bloco {i} sem campo 'text'")
                 return False
             # Normaliza voice para valor válido (tolerante)
-            voice = bloco.get("voice", "narrator").lower()
-            if voice not in vozes_validas:
-                bloco["voice"] = "narrator"
+            voice = str(bloco.get("voice", "narrator")).lower().strip()
+            bloco["voice"] = voice if voice in vozes_validas else "narrator"
         return True
 
     def _truncar_markdown(self, texto: str, max_chars: int) -> str:

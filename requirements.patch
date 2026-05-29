@@ -1,0 +1,10 @@
+--- /mnt/data/requirements.orig.txt	2026-05-28 20:50:29.678093754 +0000
++++ /mnt/data/requirements.txt	2026-05-28 20:50:35.302358487 +0000
+@@ -9,6 +9,7 @@
+ # ── Ingestão de PDF ───────────────────────────────────────────────────────────
+ docling>=2.0.0            # Conversão PDF → Markdown + detecção de layout
+ Pillow>=10.0.0            # Recorte e manipulação de imagens extraídas
++pypdf>=4.0.0               # Divide PDFs em partes antes do Docling
+ 
+ # ── Opcional: aceleração Docling em CPU/GPU ───────────────────────────────────
+ # torch>=2.0.0            # Descomente para usar modelos ML do Docling no GPU
